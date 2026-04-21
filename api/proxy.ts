@@ -7,7 +7,8 @@ const BACKENDS = [
   "http://north.ayanakojivps.shop",
 ];
 
-const IDLE_TIMEOUT = 300; // 5 minutes
+// 5-minute rotation window
+const WINDOW = 300;
 
 function hash(str: string) {
   let h = 0;
@@ -18,24 +19,11 @@ function hash(str: string) {
   return Math.abs(h);
 }
 
-function pickDifferent(exclude: string) {
-  const options = BACKENDS.filter((b) => b !== exclude);
-  return options[Math.floor(Math.random() * options.length)];
-}
-
-// ⚡ Edge-local session store (best effort)
-const sessions = new Map<
-  string,
-  { backend: string; last: number }
->();
-
 export default async function handler(req: Request) {
   const url = new URL(req.url);
 
   const parts = url.pathname.split("/").filter(Boolean);
 
-  // RULE STRUCTURE:
-  // /btV5... /uuid / path
   const sessionId = parts[0];
   const uuid = parts[1];
   const restPath = "/" + parts.slice(2).join("/");
@@ -44,38 +32,12 @@ export default async function handler(req: Request) {
     return new Response("Missing IDs", { status: 400 });
   }
 
-  const key = sessionId + ":" + uuid;
-  const now = Math.floor(Date.now() / 1000);
+  // ⏱ global time bucket (5 min)
+  const bucket = Math.floor(Date.now() / 1000 / WINDOW);
 
-  let entry = sessions.get(key);
-
-  let backend: string;
-
-  if (!entry) {
-    // 🆕 first request → deterministic start backend
-    backend =
-      BACKENDS[hash(key) % BACKENDS.length];
-
-    sessions.set(key, {
-      backend,
-      last: now,
-    });
-  } else {
-    const idle = now - entry.last;
-
-    if (idle >= IDLE_TIMEOUT) {
-      // 🔁 inactive → pick RANDOM but NOT previous backend
-      backend = pickDifferent(entry.backend);
-    } else {
-      // 🟢 active → stick to same backend
-      backend = entry.backend;
-    }
-
-    sessions.set(key, {
-      backend,
-      last: now,
-    });
-  }
+  // 🔥 deterministic backend selection per time window
+  const backend =
+    BACKENDS[hash(sessionId + ":" + bucket) % BACKENDS.length];
 
   const backendUrl =
     backend + "/" + sessionId + "/" + uuid + restPath + url.search;
