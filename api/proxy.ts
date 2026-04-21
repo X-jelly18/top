@@ -8,7 +8,7 @@ const BACKENDS = [
 ];
 
 // 5-minute switch interval
-const INTERVAL = 300;
+const INTERVAL = 5000;
 
 function hash(str: string) {
   let h = 2166136261;
