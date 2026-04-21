@@ -7,8 +7,6 @@ const BACKENDS = [
   "http://north.ayanakojivps.shop",
 ];
 
-const WINDOW = 300; // 5 minutes
-
 function hash(str: string) {
   let h = 0;
   for (let i = 0; i < str.length; i++) {
@@ -28,17 +26,12 @@ export default async function handler(req: Request) {
   const restPath = "/" + parts.slice(2).join("/");
 
   if (!sessionId || !uuid) {
-    return new Response("Missing sessionId or uuid", { status: 400 });
+    return new Response("Missing IDs", { status: 400 });
   }
 
-  const now = Math.floor(Date.now() / 1000);
-  const bucket = Math.floor(now / WINDOW);
-
-  // 🔥 stable + idle-based routing
-  const backendIndex =
-    hash(sessionId + ":" + uuid + ":" + bucket) % BACKENDS.length;
-
-  const backend = BACKENDS[backendIndex];
+  // 🔥 PURE deterministic routing (NO TIME, NO MEMORY)
+  const backend =
+    BACKENDS[hash(sessionId + ":" + uuid) % BACKENDS.length];
 
   const backendUrl =
     backend + "/" + sessionId + "/" + uuid + restPath + url.search;
