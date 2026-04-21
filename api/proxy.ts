@@ -7,16 +7,15 @@ const BACKENDS = [
   "http://north.ayanakojivps.shop",
 ];
 
-// 5-minute rotation window
 const WINDOW = 300;
 
 function hash(str: string) {
-  let h = 0;
+  let h = 2166136261; // better seed (FNV-ish)
   for (let i = 0; i < str.length; i++) {
-    h = (h << 5) - h + str.charCodeAt(i);
-    h |= 0;
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  return Math.abs(h);
+  return h >>> 0;
 }
 
 export default async function handler(req: Request) {
@@ -32,12 +31,14 @@ export default async function handler(req: Request) {
     return new Response("Missing IDs", { status: 400 });
   }
 
-  // ⏱ global time bucket (5 min)
   const bucket = Math.floor(Date.now() / 1000 / WINDOW);
 
-  // 🔥 deterministic backend selection per time window
-  const backend =
-    BACKENDS[hash(sessionId + ":" + bucket) % BACKENDS.length];
+  // 🔥 stronger entropy mix (fixes “always south” issue)
+  const key = sessionId + ":" + uuid + ":" + bucket;
+
+  const index = hash(key) % BACKENDS.length;
+
+  const backend = BACKENDS[index];
 
   const backendUrl =
     backend + "/" + sessionId + "/" + uuid + restPath + url.search;
