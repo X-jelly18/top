@@ -7,39 +7,7 @@ const BACKENDS = [
   "http://north.ayanakojivps.shop",
 ];
 
-const SESSION_WINDOW = 180; // 3 minutes
-
-function hash(str: string) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) {
-    h = (h << 5) - h + str.charCodeAt(i);
-    h |= 0;
-  }
-  return Math.abs(h);
-}
-
-async function tryFetch(url: string, opts: RequestInit) {
-  const c = new AbortController();
-  const t = setTimeout(() => c.abort(), 4000);
-
-  try {
-    const res = await fetch(url, { ...opts, signal: c.signal });
-    clearTimeout(t);
-    if (!res.ok) throw new Error("bad");
-    return res;
-  } catch {
-    clearTimeout(t);
-    return null;
-  }
-}
-
-const penalty = new Map<string, number>();
-
-function getScore(b: string) {
-  const base = 100;
-  const p = penalty.get(b) || 0;
-  return Math.max(10, base - p);
-}
+const IDLE_TIMEOUT = 300; // 5 minutes
 
 export default async function handler(req: Request) {
   const url = new URL(req.url);
@@ -55,16 +23,38 @@ export default async function handler(req: Request) {
   const path = "/" + parts.slice(1).join("/");
 
   const now = Math.floor(Date.now() / 1000);
-  const bucket = Math.floor(now / SESSION_WINDOW);
 
-  // deterministic + time-based routing per UUID
-  const baseIndex =
-    hash(sessionId + ":" + uuid + ":" + bucket) % BACKENDS.length;
+  // session key
+  const key = sessionId + ":" + uuid;
 
-  const ordered = [
-    BACKENDS[baseIndex],
-    ...BACKENDS.filter((_, i) => i !== baseIndex),
-  ];
+  // in-memory session store (Edge runtime)
+  const store = globalThis as any;
+  store.__SESSIONS ||= new Map<string, { backend: string; last: number }>();
+  const sessions: Map<string, { backend: string; last: number }> =
+    store.__SESSIONS;
+
+  const session = sessions.get(key);
+
+  let backend: string;
+
+  if (!session) {
+    // 🆕 NEW UUID → RANDOM backend
+    backend = BACKENDS[Math.floor(Math.random() * BACKENDS.length)];
+  } else if (now - session.last > IDLE_TIMEOUT) {
+    // 🔁 IDLE expired → RANDOM new backend
+    backend = BACKENDS[Math.floor(Math.random() * BACKENDS.length)];
+  } else {
+    // 🟢 ACTIVE → keep same backend
+    backend = session.backend;
+  }
+
+  // save/update session
+  sessions.set(key, {
+    backend,
+    last: now,
+  });
+
+  const backendUrl = backend + path + url.search;
 
   const headers = new Headers(req.headers);
   headers.delete("host");
@@ -72,8 +62,8 @@ export default async function handler(req: Request) {
   headers.delete("content-length");
   headers.delete("accept-encoding");
 
-  for (const backend of ordered) {
-    const res = await tryFetch(backend + path + url.search, {
+  try {
+    const res = await fetch(backendUrl, {
       method: req.method,
       headers,
       body:
@@ -83,22 +73,15 @@ export default async function handler(req: Request) {
       redirect: "manual",
     });
 
-    if (res) {
-      penalty.set(backend, Math.max(0, (penalty.get(backend) || 0) - 2));
-
-      return new Response(res.body, {
-        status: res.status,
-        headers: {
-          ...Object.fromEntries(res.headers),
-          "cache-control": "no-store",
-          "x-accel-buffering": "no",
-        },
-      });
-    }
-
-    // temporary penalty for failing VPS
-    penalty.set(backend, (penalty.get(backend) || 0) + 20);
+    return new Response(res.body, {
+      status: res.status,
+      headers: {
+        ...Object.fromEntries(res.headers),
+        "cache-control": "no-store",
+        "x-accel-buffering": "no",
+      },
+    });
+  } catch {
+    return new Response("Backend unreachable", { status: 502 });
   }
-
-  return new Response("All backends failed", { status: 502 });
 }
