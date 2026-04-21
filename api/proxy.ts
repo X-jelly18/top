@@ -5,69 +5,100 @@ export const config = {
 const BACKENDS = [
   "http://south.ayanakojivps.shop",
   "http://north.ayanakojivps.shop",
-  "http://east.ayanakojivps.shop",
 ];
 
-const WINDOW = 180; // 3 minutes
+const SESSION_WINDOW = 180; // 3 minutes
 
-function hashString(str: string) {
-  let hash = 0;
+function hash(str: string) {
+  let h = 0;
   for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
+    h = (h << 5) - h + str.charCodeAt(i);
+    h |= 0;
   }
-  return Math.abs(hash);
+  return Math.abs(h);
+}
+
+async function tryFetch(url: string, opts: RequestInit) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), 4000);
+
+  try {
+    const res = await fetch(url, { ...opts, signal: c.signal });
+    clearTimeout(t);
+    if (!res.ok) throw new Error("bad");
+    return res;
+  } catch {
+    clearTimeout(t);
+    return null;
+  }
+}
+
+const penalty = new Map<string, number>();
+
+function getScore(b: string) {
+  const base = 100;
+  const p = penalty.get(b) || 0;
+  return Math.max(10, base - p);
 }
 
 export default async function handler(req: Request) {
   const url = new URL(req.url);
 
-  // FULL PATH: /uuid/path...
   const parts = url.pathname.split("/");
+  const sessionId = parts[1];
+  const uuid = parts[2];
 
-  const sessionId = parts[1]; // btV5knWzHGnPcjGkKROmeC4Pke
-  if (!sessionId) {
-    return new Response("Missing session ID", { status: 400 });
+  if (!sessionId || !uuid) {
+    return new Response("Missing IDs", { status: 400 });
   }
 
-  // rebuild original path AFTER session id
-  const restPath = "/" + parts.slice(1).join("/");
+  const path = "/" + parts.slice(1).join("/");
 
-  // ⏱ time bucket (3 min rotation)
   const now = Math.floor(Date.now() / 1000);
-  const bucket = Math.floor(now / WINDOW);
+  const bucket = Math.floor(now / SESSION_WINDOW);
 
-  // 🔥 deterministic routing per session + time window
-  const key = sessionId + ":" + bucket;
-  const index = hashString(key) % BACKENDS.length;
+  // deterministic + time-based routing per UUID
+  const baseIndex =
+    hash(sessionId + ":" + uuid + ":" + bucket) % BACKENDS.length;
 
-  const target = BACKENDS[index];
-  const backendUrl = target + restPath + url.search;
+  const ordered = [
+    BACKENDS[baseIndex],
+    ...BACKENDS.filter((_, i) => i !== baseIndex),
+  ];
 
-  // headers cleanup (important for streaming)
   const headers = new Headers(req.headers);
   headers.delete("host");
   headers.delete("connection");
   headers.delete("content-length");
   headers.delete("accept-encoding");
 
-  const upstream = await fetch(backendUrl, {
-    method: req.method,
-    headers,
-    body:
-      req.method === "GET" || req.method === "HEAD"
-        ? undefined
-        : req.body,
-    redirect: "manual",
-  });
+  for (const backend of ordered) {
+    const res = await tryFetch(backend + path + url.search, {
+      method: req.method,
+      headers,
+      body:
+        req.method === "GET" || req.method === "HEAD"
+          ? undefined
+          : req.body,
+      redirect: "manual",
+    });
 
-  // STREAMING response (no buffering)
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: {
-      ...Object.fromEntries(upstream.headers),
-      "cache-control": "no-store",
-      "x-accel-buffering": "no",
-    },
-  });
+    if (res) {
+      penalty.set(backend, Math.max(0, (penalty.get(backend) || 0) - 2));
+
+      return new Response(res.body, {
+        status: res.status,
+        headers: {
+          ...Object.fromEntries(res.headers),
+          "cache-control": "no-store",
+          "x-accel-buffering": "no",
+        },
+      });
+    }
+
+    // temporary penalty for failing VPS
+    penalty.set(backend, (penalty.get(backend) || 0) + 20);
+  }
+
+  return new Response("All backends failed", { status: 502 });
 }
