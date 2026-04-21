@@ -8,10 +8,8 @@ const BACKENDS = [
   "http://east.ayanakojivps.shop",
 ];
 
-// ⏱ 3-minute inactivity window
-const WINDOW = 180;
+const WINDOW = 180; // 3 minutes
 
-// Simple hash
 function hashString(str: string) {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
@@ -24,29 +22,29 @@ function hashString(str: string) {
 export default async function handler(req: Request) {
   const url = new URL(req.url);
 
+  // FULL PATH: /uuid/path...
   const parts = url.pathname.split("/");
-  const uuid = parts[2];
 
-  if (!uuid) {
-    return new Response("Missing UUID", { status: 400 });
+  const sessionId = parts[1]; // btV5knWzHGnPcjGkKROmeC4Pke
+  if (!sessionId) {
+    return new Response("Missing session ID", { status: 400 });
   }
 
-  const cleanPath = "/" + parts.slice(3).join("/");
+  // rebuild original path AFTER session id
+  const restPath = "/" + parts.slice(1).join("/");
 
+  // ⏱ time bucket (3 min rotation)
   const now = Math.floor(Date.now() / 1000);
-
-  // 🧠 time bucket (changes every 3 min)
   const bucket = Math.floor(now / WINDOW);
 
-  // 🔥 rotation salt ensures switching after inactivity
-  const salt = uuid + ":" + bucket;
+  // 🔥 deterministic routing per session + time window
+  const key = sessionId + ":" + bucket;
+  const index = hashString(key) % BACKENDS.length;
 
-  // 🎯 pick backend
-  const index = hashString(salt) % BACKENDS.length;
-  const targetHost = BACKENDS[index];
+  const target = BACKENDS[index];
+  const backendUrl = target + restPath + url.search;
 
-  const backendUrl = targetHost + cleanPath + url.search;
-
+  // headers cleanup (important for streaming)
   const headers = new Headers(req.headers);
   headers.delete("host");
   headers.delete("connection");
@@ -63,13 +61,13 @@ export default async function handler(req: Request) {
     redirect: "manual",
   });
 
-  const responseHeaders = new Headers(upstream.headers);
-  responseHeaders.set("cache-control", "no-store");
-  responseHeaders.set("x-accel-buffering", "no");
-  responseHeaders.set("connection", "keep-alive");
-
+  // STREAMING response (no buffering)
   return new Response(upstream.body, {
     status: upstream.status,
-    headers: responseHeaders,
+    headers: {
+      ...Object.fromEntries(upstream.headers),
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+    },
   });
 }
