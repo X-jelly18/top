@@ -9,6 +9,15 @@ const BACKENDS = [
 
 const IDLE_TIMEOUT = 300; // 5 minutes
 
+function hash(str: string) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = (h << 5) - h + str.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+
 export default async function handler(req: Request) {
   const url = new URL(req.url);
 
@@ -24,35 +33,17 @@ export default async function handler(req: Request) {
 
   const now = Math.floor(Date.now() / 1000);
 
-  // session key
-  const key = sessionId + ":" + uuid;
+  // deterministic base routing
+  const baseIndex =
+    hash(sessionId + ":" + uuid) % BACKENDS.length;
 
-  // in-memory session store (Edge runtime)
-  const store = globalThis as any;
-  store.__SESSIONS ||= new Map<string, { backend: string; last: number }>();
-  const sessions: Map<string, { backend: string; last: number }> =
-    store.__SESSIONS;
+  // idle-based rotation bucket (5 min)
+  const bucket = Math.floor(now / IDLE_TIMEOUT);
 
-  const session = sessions.get(key);
+  const finalIndex =
+    hash(sessionId + ":" + uuid + ":" + bucket) % BACKENDS.length;
 
-  let backend: string;
-
-  if (!session) {
-    // 🆕 NEW UUID → RANDOM backend
-    backend = BACKENDS[Math.floor(Math.random() * BACKENDS.length)];
-  } else if (now - session.last > IDLE_TIMEOUT) {
-    // 🔁 IDLE expired → RANDOM new backend
-    backend = BACKENDS[Math.floor(Math.random() * BACKENDS.length)];
-  } else {
-    // 🟢 ACTIVE → keep same backend
-    backend = session.backend;
-  }
-
-  // save/update session
-  sessions.set(key, {
-    backend,
-    last: now,
-  });
+  const backend = BACKENDS[finalIndex];
 
   const backendUrl = backend + path + url.search;
 
@@ -62,26 +53,22 @@ export default async function handler(req: Request) {
   headers.delete("content-length");
   headers.delete("accept-encoding");
 
-  try {
-    const res = await fetch(backendUrl, {
-      method: req.method,
-      headers,
-      body:
-        req.method === "GET" || req.method === "HEAD"
-          ? undefined
-          : req.body,
-      redirect: "manual",
-    });
+  const res = await fetch(backendUrl, {
+    method: req.method,
+    headers,
+    body:
+      req.method === "GET" || req.method === "HEAD"
+        ? undefined
+        : req.body,
+    redirect: "manual",
+  });
 
-    return new Response(res.body, {
-      status: res.status,
-      headers: {
-        ...Object.fromEntries(res.headers),
-        "cache-control": "no-store",
-        "x-accel-buffering": "no",
-      },
-    });
-  } catch {
-    return new Response("Backend unreachable", { status: 502 });
-  }
+  return new Response(res.body, {
+    status: res.status,
+    headers: {
+      ...Object.fromEntries(res.headers),
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+    },
+  });
 }
