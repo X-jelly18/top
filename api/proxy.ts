@@ -7,10 +7,11 @@ const BACKENDS = [
   "http://north.ayanakojivps.shop",
 ];
 
-const WINDOW = 300;
+// 5-minute switch interval
+const INTERVAL = 300;
 
 function hash(str: string) {
-  let h = 2166136261; // better seed (FNV-ish)
+  let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
     h = Math.imul(h, 16777619);
@@ -31,12 +32,12 @@ export default async function handler(req: Request) {
     return new Response("Missing IDs", { status: 400 });
   }
 
-  const bucket = Math.floor(Date.now() / 1000 / WINDOW);
+  // ⏱ fixed time window (same for everyone)
+  const window = Math.floor(Date.now() / 1000 / INTERVAL);
 
-  // 🔥 stronger entropy mix (fixes “always south” issue)
-  const key = sessionId + ":" + uuid + ":" + bucket;
-
-  const index = hash(key) % BACKENDS.length;
+  // 🔁 alternate backend every window
+  const index =
+    hash(String(window)) % BACKENDS.length;
 
   const backend = BACKENDS[index];
 
